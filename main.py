@@ -186,4 +186,5 @@ def query(question: str):
         "question": question,
         "answer": answer,
         "sources": sources
-    }
+    }clear
+    
