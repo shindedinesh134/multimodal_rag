@@ -1,8 +1,37 @@
-# fastapi
-uvicorn
+# Core Framework
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+
+# Document Parsing
+docling
 pymupdf
+pypdf
+pdf2image
+
+# Image Processing & Vision
+Pillow
+opencv-python
+replicate
+requests
+
+# Embeddings & Vector Store
 langchain
-chromadb
+faiss-cpu
 sentence-transformers
+chromadb
+
+# LLM & RAG
+openai
+tiktoken
+
+# Utilities
 python-dotenv
-pillow
+numpy
+pandas
+tabulate
+loguru
+
+# Optional: Better table extraction
+camelot-py[cv]

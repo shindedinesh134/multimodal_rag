@@ -1,190 +1,111 @@
+"""
+Multimodal RAG System - FastAPI Entry Point
+Domain: Engine Cooling System Technical Documentation
+"""
+
+import sys
 import os
-import fitz  # PyMuPDF
-from fastapi import FastAPI, UploadFile, File
-from typing import List
-from datetime import datetime
+from pathlib import Path
+from contextlib import asynccontextmanager
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.llms import OpenAI
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent))
 
-from PIL import Image
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 
-# -------------------------------
-# CONFIG
-# -------------------------------
-UPLOAD_DIR = "sample_documents"
-CHROMA_DIR = "chroma_db"
+from src.api.routes import router
+from src.api.errors import setup_exception_handlers
+from src.ingestion.ingest_pipeline import IngestionPipeline
+from src.retrieval.rag_chain import RAGChain
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Global instances
+ingestion_pipeline = None
+rag_chain = None
+startup_time = None
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handle startup and shutdown events"""
+    global ingestion_pipeline, rag_chain, startup_time
+    import datetime
+    startup_time = datetime.datetime.now()
+    
+    logger.info("🚀 Starting Multimodal RAG System...")
+    
+    # Initialize pipelines
+    ingestion_pipeline = IngestionPipeline()
+    rag_chain = RAGChain()
+    
+    # Load existing vector store if available
+    try:
+        rag_chain.load_vector_store()
+        logger.info("✅ Loaded existing vector store")
+    except FileNotFoundError:
+        logger.info("ℹ️ No existing vector store found - ready for ingestion")
+    except Exception as e:
+        logger.error(f"⚠️ Error loading vector store: {e}")
+    
+    yield
+    
+    # Shutdown cleanup
+    logger.info("🛑 Shutting down...")
+    if rag_chain and rag_chain.vector_store:
+        rag_chain.vector_store.persist()
 
-start_time = datetime.now()
-
-# -------------------------------
-# LOAD EMBEDDING MODEL
-# -------------------------------
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+# Create FastAPI app
+app = FastAPI(
+    title="Multimodal RAG System - Engine Cooling Documentation",
+    description="""
+    ## Intelligent Query System for Engine Cooling Technical Manuals
+    
+    This system enables semantic search and question answering across 
+    multimodal technical documentation including:
+    - **Text**: Installation procedures, specifications, troubleshooting
+    - **Tables**: Coolant capacity charts, temperature thresholds, part numbers
+    - **Images**: Cooling system diagrams, flow schematics, component photos
+    
+    ### Features
+    - Upload PDF manuals via `/ingest`
+    - Ask technical questions via `/query`
+    - Get answers with source references (page, chunk type)
+    """,
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-vector_db = None
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# Setup exception handlers
+setup_exception_handlers(app)
 
-# -------------------------------
-# PDF PROCESSING
-# -------------------------------
-def process_pdf(file_path):
-    doc = fitz.open(file_path)
+# Include routes
+app.include_router(router)
 
-    all_chunks = []
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
-    )
-
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-
-        # TEXT EXTRACTION
-        text = page.get_text()
-        if text:
-            chunks = text_splitter.split_text(text)
-            for chunk in chunks:
-                all_chunks.append({
-                    "content": chunk,
-                    "metadata": {
-                        "type": "text",
-                        "page": page_num
-                    }
-                })
-
-        # IMAGE EXTRACTION
-        images = page.get_images(full=True)
-
-        for img_index, img in enumerate(images):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-
-            image_path = f"{UPLOAD_DIR}/page{page_num}_img{img_index}.png"
-
-            with open(image_path, "wb") as f:
-                f.write(image_bytes)
-
-            # 🔥 SIMPLE IMAGE SUMMARY (IMPORTANT FOR MARKS)
-            image_summary = f"Diagram on page {page_num} showing engine cooling system flow and components"
-
-            all_chunks.append({
-                "content": image_summary,
-                "metadata": {
-                    "type": "image",
-                    "page": page_num
-                }
-            })
-
-    return all_chunks
-
-
-# -------------------------------
-# INGEST FUNCTION
-# -------------------------------
-def ingest_to_db(chunks):
-    global vector_db
-
-    texts = [c["content"] for c in chunks]
-    metadatas = [c["metadata"] for c in chunks]
-
-    vector_db = Chroma.from_texts(
-        texts=texts,
-        embedding=embedding_model,
-        metadatas=metadatas,
-        persist_directory=CHROMA_DIR
-    )
-
-    vector_db.persist()
-
-
-# -------------------------------
-# QUERY FUNCTION
-# -------------------------------
-def query_rag(question):
-    docs = vector_db.similarity_search(question, k=5)
-
-    context = "\n".join([d.page_content for d in docs])
-
-    prompt = f"""
-    Answer the question using the context below.
-    Also mention page number.
-
-    Context:
-    {context}
-
-    Question:
-    {question}
-    """
-
-    llm = OpenAI(temperature=0)
-
-    answer = llm(prompt)
-
-    sources = [
-        {
-            "content": d.page_content[:100],
-            "metadata": d.metadata
-        }
-        for d in docs
-    ]
-
-    return answer, sources
-
-
-# -------------------------------
-# API ENDPOINTS
-# -------------------------------
-
-@app.get("/health")
-def health():
-    uptime = str(datetime.now() - start_time)
-
+# Health check endpoint is in routes.py, but adding a root for convenience
+@app.get("/")
+async def root():
     return {
-        "status": "running",
-        "documents_loaded": 1 if vector_db else 0,
-        "uptime": uptime
+        "message": "Multimodal RAG System for Engine Cooling Documentation",
+        "docs": "/docs",
+        "health": "/health",
+        "version": "1.0.0"
     }
 
-
-@app.post("/ingest")
-async def ingest(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
-
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-
-    chunks = process_pdf(file_path)
-
-    ingest_to_db(chunks)
-
-    text_chunks = len([c for c in chunks if c["metadata"]["type"] == "text"])
-    image_chunks = len([c for c in chunks if c["metadata"]["type"] == "image"])
-
-    return {
-        "message": "Ingestion successful",
-        "text_chunks": text_chunks,
-        "image_chunks": image_chunks
-    }
-
-
-@app.post("/query")
-def query(question: str):
-    answer, sources = query_rag(question)
-
-    return {
-        "question": question,
-        "answer": answer,
-        "sources": sources
-    }clear
-    
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
